@@ -7,7 +7,7 @@
 #include <Arduino.h>
 
 // Pin-Definitionen für Motortreiber
-const int R_PWM = 16; MOTOR
+const int R_PWM = 16; 
 const int L_PWM = 17; 
 
 // Endschalter-Pins
