@@ -1,1 +1,378 @@
+// ==========================================
+// HAUPTPROGRAMM (.INO) - ABLAUFSTEUERUNG
+// ==========================================
+#include "motor_control.h"
+#include "sensors.h"
 
+// Zustände für die Ablaufsteuerung
+enum State {
+  IDLE,               
+  FAHRT_RECHTS,       
+  FAHRT_LINKS,        
+  US_FAHRT_RECHTS,    
+  US_FAHRT_LINKS,     
+  WARTE_STOP_R,       
+  WARTE_STOP_L        
+};
+
+State aktuellerZustand = IDLE;
+unsigned long zustandsTimer = 0;
+
+enum US_Direction { US_GO_RECHTS, US_GO_LINKS };
+US_Direction naechsteUSRichtung = US_GO_RECHTS;
+
+// Variablen für das Entprellen & Timer
+const unsigned long DEBOUNCE_TIME = 20; 
+unsigned long endR_Timer = 0;
+unsigned long endL_Timer = 0;
+unsigned long tasterWeissTimer = 0;
+unsigned long tasterBlauTimer = 0;
+unsigned long tasterGruenTimer = 0;
+
+unsigned long sensorMessTimer = 0;   
+unsigned long usSperrTimer = 0;      
+unsigned long displayTimer = 0;
+// ==========================================
+// INTEGRATION: DREHGEBER (NEU)
+// ==========================================
+const int ROTARY_CLK = 6;              // Encoder CLK an GP6 (3.3V beachten!)
+const int ROTARY_DT = 7;               // Encoder DT an GP7 (3.3V beachten!)
+int lastStateCLK;
+volatile int motorGeschwindigkeit = 35; // PWM-Startwert (0-255)
+const int SPEED_STEP = 2;             // Schrittweite pro Encoder-Rastung
+unsigned long letzteEncoderZeit = 0; // NEU: Verhindert Fehlmessungen durch Prellen
+
+// ==========================================
+// PIN-DEFINITIONEN FUNKMODUL (NEU)
+// ==========================================
+const int FUNK_STOP = 12;    // D0 (Not-Stopp)
+const int FUNK_LINKS = 10;   // D1 (Fahrt Links / Weiss)
+const int FUNK_RECHTS = 11;  // D2 (Fahrt Rechts / Blau)
+const int FUNK_ERW = 13;     // D3 (Für spätere Erweiterungen reserviert)
+
+// Sensor- & Motorvariablen Definitionen
+float tof1Abstand = 0.0;             
+float tof2Abstand = 0.0;   
+
+bool tofSensorenAktiv = true; 
+
+volatile long encoderImpulse = 0;
+const float IMPULSE_PRO_UMDREHUNG = 240.0; 
+long zielImpulse = 0; 
+
+// Speichert den gelernten Gesamtweg zwischen den Endschaltern
+float gesamteUmdrehungen = 0.0; 
+
+int blinkAnzahlZiel = 0;
+int blinkAktuell = 0;
+bool ledStatus = false;
+unsigned long ledTimer = 0;
+const long BLINK_INTERVALL = 150; 
+
+bool endR_aktiviert = false;
+bool endL_aktiviert = false;
+
+// Instanzen definieren
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+Adafruit_VL53L0X lox1 = Adafruit_VL53L0X(); 
+Adafruit_VL53L0X lox2 = Adafruit_VL53L0X(); 
+
+// INTERRUPT für den Encoder
+void encoderInterrupt() {
+  if (aktuellerZustand == FAHRT_RECHTS || aktuellerZustand == US_FAHRT_RECHTS) {
+    encoderImpulse++;
+  } else if (aktuellerZustand == FAHRT_LINKS || aktuellerZustand == US_FAHRT_LINKS) {
+    encoderImpulse--;
+  }
+}
+
+// Aktualisierung der Anzeige (Mit ToF UND Motor-Speed gleichzeitig)
+void aktualisiereOLED() {
+  u8g2.clearBuffer();          
+  u8g2.setFont(u8g2_font_6x10_tr); 
+
+  float umdrehungen = (float)encoderImpulse / IMPULSE_PRO_UMDREHUNG;
+
+  u8g2.drawStr(0, 10, "=== NIKIS FINEST AUTO DOOR ===");
+  u8g2.drawHLine(0, 14, 128); 
+
+  u8g2.drawStr(0, 24, "Status:");
+  switch (aktuellerZustand) {
+    case IDLE:            u8g2.drawStr(60, 24, "BEREIT"); break;
+    case FAHRT_RECHTS:    u8g2.drawStr(60, 24, "T-RECHTS"); break;
+    case FAHRT_LINKS:     u8g2.drawStr(60, 24, "T-LINKS"); break;
+    case US_FAHRT_RECHTS: u8g2.drawStr(60, 24, "GAR. OEFFNEN"); break;
+    case US_FAHRT_LINKS:  u8g2.drawStr(60, 24, "GAR. SCHLIESS"); break;
+    case WARTE_STOP_R:    u8g2.drawStr(60, 24, "STOP (R)"); break;
+    case WARTE_STOP_L:    u8g2.drawStr(60, 24, "STOP (L)"); break;
+  }
+
+  u8g2.drawStr(0, 34, "Umdreh.:");
+  u8g2.setCursor(60, 34);
+  u8g2.print(umdrehungen, 1);
+  u8g2.print(" Rnd");
+
+  // Zeile 44: Hier stehen jetzt kompakt die ToF-Sensoren
+  u8g2.drawStr(0, 44, "ToF R/L:");
+  u8g2.setCursor(60, 44);
+  if(tof1Abstand > 300.0) u8g2.print("---");
+  else { u8g2.print(tof1Abstand, 0); }
+  u8g2.print(" / ");
+  if(tof2Abstand > 300.0) u8g2.print("---");
+  else { u8g2.print(tof2Abstand, 0); u8g2.print(" cm"); }
+
+  // Zeile 54: EIGENE ZEILE FÜR DEN SPEED (Angepasst auf Max 80)
+  u8g2.drawStr(0, 54, "Geschw.:");
+  u8g2.setCursor(60, 54);
+  u8g2.print(motorGeschwindigkeit);
+  u8g2.print(" / 80"); // Text auf das neue Maximum angepasst
+
+
+  if (endL_aktiviert) u8g2.drawStr(0, 64, "L: [AKTIV]");
+  else                u8g2.drawStr(0, 64, "L: FREI");
+  u8g2.drawStr(60, 64, "|");
+  if (endR_aktiviert) u8g2.drawStr(68, 64, "R: [AKTIV]");
+  else                u8g2.drawStr(68, 64, "R: FREI");
+
+  u8g2.sendBuffer(); 
+}
+
+
+// Blockierende Referenzfahrt nach rechts
+void referenzfahrtRechts() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(0, 10, "=== NIKIS FINEST AUTO DOOR ===");
+  u8g2.drawHLine(0, 14, 128);
+  u8g2.drawStr(0, 35, "Status: HOMING RECHTS...");
+  u8g2.sendBuffer();
+
+  while (digitalRead(END_R) == HIGH) {
+    analogWrite(R_PWM, 25); 
+    analogWrite(L_PWM, 0);
+    delay(5); 
+  }
+  
+  motorenStoppen();
+  encoderImpulse = 0; 
+  endR_aktiviert = true;
+  naechsteUSRichtung = US_GO_LINKS; 
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  Wire.setSDA(OLED_SDA);
+  Wire.setSCL(OLED_SCL);
+  Wire.begin(); 
+  
+  u8g2.begin();
+  initialisiereToFSensoren(); 
+
+// Funk-Pins als INPUT deklarieren (wichtig: ohne PULLUP, da das Modul HIGH liefert)
+  pinMode(FUNK_STOP, INPUT);
+  pinMode(FUNK_LINKS, INPUT);
+  pinMode(FUNK_RECHTS, INPUT);
+  pinMode(FUNK_ERW, INPUT);    // Bereits aktiv für Erweiterungen
+
+  pinMode(R_PWM, OUTPUT);
+  pinMode(L_PWM, OUTPUT);
+
+  pinMode(END_R, INPUT_PULLUP);
+  pinMode(END_L, INPUT_PULLUP);
+  pinMode(TASTER_WEISS, INPUT_PULLUP);
+  pinMode(TASTER_BLAU, INPUT_PULLUP);
+  pinMode(TASTER_GRUEN, INPUT_PULLUP);
+
+  pinMode(ENCODER_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), encoderInterrupt, FALLING);
+ // INTEGRATION DREHGEBER: Pins als INPUT_PULLUP deklarieren
+  pinMode(ROTARY_CLK, INPUT_PULLUP);
+  pinMode(ROTARY_DT, INPUT_PULLUP);
+  lastStateCLK = digitalRead(ROTARY_CLK);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+
+  analogWriteFreq(500); 
+  motorenStoppen();
+
+  referenzfahrtRechts();
+}
+
+void loop() {
+  aktualisiereLED();
+  unsigned long aktuelleZeit = millis();
+
+  // WICHTIG FÜR ENCODER: Muss ganz oben stehen, damit die Variable gültig bleibt
+  int currentStateCLK = digitalRead(ROTARY_CLK);
+
+  // ==========================================
+  // OPTIMIERT: ENCODER-ABFRAGE (30 - 80 IN 2er-SCHRITTEN)
+  // ==========================================
+  if (currentStateCLK != lastStateCLK && currentStateCLK == LOW) {
+    if (aktuelleZeit - letzteEncoderZeit >= 35) {
+      letzteEncoderZeit = aktuelleZeit; 
+
+      // Richtung ermitteln
+      if (digitalRead(ROTARY_DT) != currentStateCLK) {
+        motorGeschwindigkeit += SPEED_STEP;
+        if (motorGeschwindigkeit > 80) motorGeschwindigkeit = 80; 
+      } else {
+        motorGeschwindigkeit -= SPEED_STEP;
+        if (motorGeschwindigkeit < 30) motorGeschwindigkeit = 30; 
+      }
+      
+      // Live-Geschwindigkeit an die Motor-Pins senden
+      if (aktuellerZustand == FAHRT_RECHTS || aktuellerZustand == US_FAHRT_RECHTS) {
+        analogWrite(R_PWM, motorGeschwindigkeit);
+      } else if (aktuellerZustand == FAHRT_LINKS || aktuellerZustand == US_FAHRT_LINKS) {
+        analogWrite(L_PWM, motorGeschwindigkeit);
+      }
+    }
+  }
+  lastStateCLK = currentStateCLK;
+
+  // ==========================================
+  // 1. ENDSCHALTERÜBERWACHUNG
+  // ==========================================
+  if (digitalRead(END_R) == LOW) {
+    if (endR_Timer == 0) endR_Timer = aktuelleZeit; 
+    else if (aktuelleZeit - endR_Timer >= DEBOUNCE_TIME) {
+      endR_aktiviert = true;
+      if (aktuellerZustand == FAHRT_RECHTS || aktuellerZustand == US_FAHRT_RECHTS) {
+        motorenStoppen();
+        
+        if(encoderImpulse > 10) { 
+          gesamteUmdrehungen = (float)encoderImpulse / IMPULSE_PRO_UMDREHUNG;
+        }
+        encoderImpulse = 0; 
+
+        starteBlinken(1);                
+        aktuellerZustand = WARTE_STOP_R; 
+        naechsteUSRichtung = US_GO_LINKS; 
+        zustandsTimer = aktuelleZeit;        
+      }
+    }
+  } else { endR_Timer = 0; endR_aktiviert = false; }
+
+  if (digitalRead(END_L) == LOW) {
+    if (endL_Timer == 0) endL_Timer = aktuelleZeit; 
+    else if (aktuelleZeit - endL_Timer >= DEBOUNCE_TIME) {
+      endL_aktiviert = true;
+      if (aktuellerZustand == FAHRT_LINKS || aktuellerZustand == US_FAHRT_LINKS) {
+        motorenStoppen();
+
+        if(encoderImpulse < -10) {
+          gesamteUmdrehungen = (float)abs(encoderImpulse) / IMPULSE_PRO_UMDREHUNG;
+        }
+
+        starteBlinken(2);                
+        aktuellerZustand = WARTE_STOP_L; 
+        naechsteUSRichtung = US_GO_RECHTS; 
+        zustandsTimer = aktuelleZeit;        
+      }
+    }
+  } else { endL_Timer = 0; endL_aktiviert = false; }
+
+  // ==========================================
+  // 2. ABSOLUT SICHERE MESSUNG BEIDER TOF SENSOREN
+  // ==========================================
+  if (aktuelleZeit - sensorMessTimer >= 90) {
+    sensorMessTimer = aktuelleZeit;
+    
+    // Sensoren messen dauerhaft im Hintergrund mit dem 10-30cm Filter
+    tof1Abstand = messeToF_Gefiltert(lox1, 1);
+    tof2Abstand = messeToF_Gefiltert(lox2, 2);
+
+    bool tof1Triggered = (tof1Abstand < 999.0);
+    bool tof2Triggered = (tof2Abstand < 999.0);
+
+    if (aktuellerZustand == IDLE && (tof1Triggered || tof2Triggered) && (aktuelleZeit - usSperrTimer >= 3000)) {
+      usSperrTimer = aktuelleZeit; 
+      
+      if (endR_aktiviert) naechsteUSRichtung = US_GO_LINKS;
+      if (endL_aktiviert) naechsteUSRichtung = US_GO_RECHTS;
+
+      aktuellerZustand = (naechsteUSRichtung == US_GO_RECHTS) ? US_FAHRT_RECHTS : US_FAHRT_LINKS;
+      
+      if(aktuellerZustand == US_FAHRT_RECHTS) {
+         analogWrite(R_PWM, motorGeschwindigkeit); 
+         analogWrite(L_PWM, 0);
+      } else {
+         analogWrite(R_PWM, 0);
+         analogWrite(L_PWM, motorGeschwindigkeit);
+      }
+    }
+  }
+
+
+
+    // ==========================================
+  // 3. ENCODER-ÜBERWACHUNG (STOPP NACH 5 UMDREHUNGEN)
+  // ==========================================
+  if (aktuellerZustand == FAHRT_RECHTS || aktuellerZustand == FAHRT_LINKS) {
+    if (abs(encoderImpulse) >= zielImpulse) {
+      motorenStoppen();
+      encoderImpulse = 0; 
+      starteBlinken(3);   
+      aktuellerZustand = IDLE;
+    }
+  }
+
+  // ==========================================
+  // 4. NOT-STOPP (GRÜNER TASTER ODER FUNK D0 auf GP12)
+  // ==========================================
+  if (digitalRead(TASTER_GRUEN) == LOW || digitalRead(FUNK_STOP) == HIGH) {
+    if (tasterGruenTimer == 0) tasterGruenTimer = aktuelleZeit;
+    else if (aktuelleZeit - tasterGruenTimer >= DEBOUNCE_TIME) {
+      motorenStoppen();   
+      encoderImpulse = 0; 
+      
+      if (aktuellerZustand == US_FAHRT_RECHTS || aktuellerZustand == US_FAHRT_LINKS) {
+        usSperrTimer = aktuelleZeit; 
+      }
+      
+      aktuellerZustand = IDLE;
+    }
+  } else { tasterGruenTimer = 0; }
+
+  // ==========================================
+  // 5. TASTER- & FUNKABFRAGEN (NUR IM IDLE-ZUSTAND)
+  // ==========================================
+  if (aktuellerZustand == IDLE) {
+    // Blauer Taster (LOW) ODER Funk D2 auf GP11 (HIGH) -> Fahrt Rechts
+    if ((digitalRead(TASTER_BLAU) == LOW || digitalRead(FUNK_RECHTS) == HIGH) && !endR_aktiviert) {
+      if (tasterBlauTimer == 0) tasterBlauTimer = aktuelleZeit;
+      else if (aktuelleZeit - tasterBlauTimer >= DEBOUNCE_TIME) {
+        encoderImpulse = 0; 
+        zielImpulse = 2 * IMPULSE_PRO_UMDREHUNG; 
+        aktuellerZustand = FAHRT_RECHTS;
+        analogWrite(R_PWM, motorGeschwindigkeit);
+        analogWrite(L_PWM, 0);
+      }
+    } else { tasterBlauTimer = 0; }
+
+    // Weißer Taster (LOW) ODER Funk D1 auf GP10 (HIGH) -> Fahrt Links
+    if ((digitalRead(TASTER_WEISS) == LOW || digitalRead(FUNK_LINKS) == HIGH) && !endL_aktiviert) { 
+      if (tasterWeissTimer == 0) tasterWeissTimer = aktuelleZeit;
+      else if (aktuelleZeit - tasterWeissTimer >= DEBOUNCE_TIME) {
+        encoderImpulse = 0; 
+        zielImpulse = 2 * IMPULSE_PRO_UMDREHUNG; 
+        aktuellerZustand = FAHRT_LINKS;
+        analogWrite(R_PWM, 0);
+        analogWrite(L_PWM, motorGeschwindigkeit);
+      }
+    } else { tasterWeissTimer = 0; }
+  }
+
+  // Automatische Rückkehr aus dem Wartezustand nach Endschalter-Kontakt
+  if ((aktuellerZustand == WARTE_STOP_R || aktuellerZustand == WARTE_STOP_L) && (aktuelleZeit - zustandsTimer >= 2000)) {
+     aktuellerZustand = IDLE;
+  }
+  
+  // Display zyklisch aktualisieren (alle 100ms)
+  if (aktuelleZeit - displayTimer >= 100) {
+    displayTimer = aktuelleZeit;
+    aktualisiereOLED();
+  }
+}
