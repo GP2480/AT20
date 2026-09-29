@@ -1,0 +1,255 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_TSL2591.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <U8g2lib.h>
+
+#define ONE_WIRE_BUS 15     // DS18B20 Datenleitung an GP15
+#define INT_LED 17 // Externe LED Gruen GP17
+#define EXT_LED 14          // Externe LED an GP14
+#define TASTER_PIN 16       // Taster an GP16 (schaltet gegen GND)
+
+// OLED-Display initialisieren (SH1106 128x64 über Hardware-I2C für das 1.3" Display)
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+Adafruit_TSL2591 tsl = Adafruit_TSL2591(2591);
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Zustände für das System
+bool messungAktiv = false;
+bool letzterTasterZustand = HIGH; // HIGH bedeutet nicht gedrückt (wegen Pull-Up)
+
+// Zwischengespeicherte Werte für das Display
+float aktuellerLuxWert = 0.0;
+float letzteTemperatur = -999.0; // Standardwert wenn noch nicht gemessen
+
+// Zeitsteuerung (Timer)
+unsigned long letzteLichtMessung = 0;
+unsigned long letzteTempMessung = 0;
+unsigned long ledTimer = 0;
+unsigned long letzterTasterWechsel = 0; // Für das Entprellen
+const unsigned long entprellZeit = 50;  // 50ms Entprellzeit
+
+// Variablen für die Blink-Schleife (Zustandsautomat)
+int aktuellerLedPin = INT_LED;
+int blinkZehner = 0;
+int blinkEiner = 0;
+int blinkSchritt = 0; 
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(INT_LED, OUTPUT);
+  pinMode(EXT_LED, OUTPUT);
+  
+  // Taster mit internem Pull-Up-Widerstand aktivieren
+  pinMode(TASTER_PIN, INPUT_PULLUP);
+  
+  Wire.begin(); 
+  
+  // OLED starten
+  u8g2.begin();
+  u8g2.clearDisplay();
+  
+  if (!tsl.begin()) {
+    Serial.println("Fehler: TSL2591 fehlt!");
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(0, 20, "TSL2591 FEHLT!");
+    u8g2.sendBuffer();
+    while (1);
+  }
+  tsl.setGain(TSL2591_GAIN_LOW);
+  tsl.setTiming(TSL2591_INTEGRATIONTIME_100MS);
+  
+  sensors.begin();
+  Serial.println("System gestartet. Taster- und Lichtmessung bereit.");
+}
+
+// Startet den Blink-Vorgang im Hintergrund
+void starteBlinkMuster(int ledPin, int temp) {
+  aktuellerLedPin = ledPin;
+  if (temp == 0) {
+    blinkSchritt = 4; 
+    digitalWrite(INT_LED, HIGH);   digitalWrite(EXT_LED, HIGH);
+    ledTimer = millis();
+    return;
+  }
+  int absolutWert = abs(temp);
+  blinkZehner = (absolutWert / 10) * 2; 
+  blinkEiner = (absolutWert % 10) * 2;
+  if (blinkZehner > 0) blinkSchritt = 1; 
+  else blinkSchritt = 3; 
+  ledTimer = millis();
+}
+
+// Verarbeitet das Blinken im Millisekunden-Takt (Non-blocking)
+void verarbeiteBlinken() {
+  if (blinkSchritt == 0) return; 
+  unsigned long jetzt = millis();
+
+  if (blinkSchritt == 4) { // 0 Grad
+    if (jetzt - ledTimer >= 3000) {
+      digitalWrite(INT_LED, LOW);   digitalWrite(EXT_LED, LOW);
+      blinkSchritt = 0; 
+    }
+    return;
+  }
+
+  if (blinkSchritt == 1) { // Zehner
+    bool ledStatus = digitalRead(aktuellerLedPin);
+    unsigned long warteZeit = ledStatus ? 600 : 400;
+    if (jetzt - ledTimer >= warteZeit) {
+      digitalWrite(aktuellerLedPin, !ledStatus); 
+      blinkZehner--; ledTimer = jetzt;
+      if (blinkZehner <= 0) {
+        digitalWrite(aktuellerLedPin, LOW);
+        if (blinkEiner > 0) blinkSchritt = 2; 
+        else blinkSchritt = 0; 
+      }
+    }
+  }
+  else if (blinkSchritt == 2) { // Pause
+    if (jetzt - ledTimer >= 800) {
+      blinkSchritt = 3; ledTimer = jetzt;
+    }
+  }
+  else if (blinkSchritt == 3) { // Einer
+    bool ledStatus = digitalRead(aktuellerLedPin);
+    unsigned long warteZeit = ledStatus ? 200 : 300;
+    if (jetzt - ledTimer >= warteZeit) {
+      digitalWrite(aktuellerLedPin, !ledStatus);
+      blinkEiner--; ledTimer = jetzt;
+      if (blinkEiner <= 0) {
+        digitalWrite(aktuellerLedPin, LOW);
+        blinkSchritt = 0; 
+      }
+    }
+  }
+}
+
+// Aktualisiert den Inhalt auf dem OLED-Bildschirm
+void aktualisiereOLED() {
+  u8g2.clearBuffer(); 
+  // 1. Überschrift & Status
+  u8g2.setFont(u8g2_font_6x12_tr);
+  u8g2.drawStr(0, 10, "Nikis Finest Dashboard");
+  u8g2.drawHLine(0, 14, 128); 
+  
+  u8g2.drawStr(0, 28, "STATUS:");
+  if (messungAktiv) {
+    u8g2.drawStr(50, 28, "LED BLINKEN");
+  } else {
+    u8g2.drawStr(50, 28, "STANDBY (AUS)");
+  }
+  
+  // 2. Lichtwert anzeigen
+  u8g2.drawStr(0, 44, "LICHT :");
+  u8g2.setCursor(50, 44);
+  u8g2.print(aktuellerLuxWert, 1);
+  u8g2.print(" Lux");
+  
+  // 3. Temperatur anzeigen
+  u8g2.drawStr(0, 60, "TEMP  :");
+  u8g2.setCursor(50, 60);
+  if (letzteTemperatur == -999.0) {
+    u8g2.print("Warte...");
+  } else {
+    u8g2.print(letzteTemperatur, 1);
+    u8g2.print(" C");
+  }
+  
+  u8g2.sendBuffer(); 
+}
+
+void loop() {
+  unsigned long aktuelleZeit = millis();
+
+  // ----------------------------------------------------
+  // SCHRITT 1: Taster abfragen & entprellen
+  // ----------------------------------------------------
+  bool aktuellerTasterZustand = digitalRead(TASTER_PIN);
+  
+  if (aktuellerTasterZustand != letzterTasterZustand) {
+    if ((aktuelleZeit - letzterTasterWechsel) > entprellZeit) {
+      if (aktuellerTasterZustand == LOW) { // Taster gedrückt
+        messungAktiv = !messungAktiv; 
+        
+        Serial.print("\n--- TASTER GEDRÜCKT -> STATUS WECHSEL: ");
+        Serial.println(messungAktiv ? "AKTIV" : "STANDBY");
+        
+        // Jedes laufende Blinken sofort abbrechen
+        blinkSchritt = 0; 
+        digitalWrite(INT_LED, LOW);   digitalWrite(EXT_LED, LOW);
+        
+        // Kurzes optisches Feedback (Doppelblinken)
+        for(int i=0; i<2; i++) {
+          digitalWrite(INT_LED, HIGH); digitalWrite(EXT_LED, HIGH); delay(60);
+          digitalWrite(INT_LED, LOW);  digitalWrite(EXT_LED, LOW);  delay(60);
+        }
+        aktualisiereOLED();
+      }
+      letzterTasterWechsel = aktuelleZeit;
+      letzterTasterZustand = aktuellerTasterZustand;
+    }
+  }
+
+  // ----------------------------------------------------
+  // SCHRITT 2: Lichtsensor & OLED Update (Alle 500ms)
+  // ----------------------------------------------------
+  if (aktuelleZeit - letzteLichtMessung >= 500) {
+    letzteLichtMessung = aktuelleZeit;
+
+    uint32_t lum = tsl.getFullLuminosity();
+    uint16_t ir = lum >> 16;
+    uint16_t full = lum & 0xFFFF;
+    aktuellerLuxWert = tsl.calculateLux(full, ir);
+    if (isnan(aktuellerLuxWert)) aktuellerLuxWert = 0.0;
+
+    if (!messungAktiv) {
+      Serial.print("Standby - Licht: "); Serial.print(aktuellerLuxWert); Serial.println(" Lux");
+    } else {
+      Serial.print("[Aktiv] Licht: "); Serial.print(aktuellerLuxWert); Serial.println(" Lux");
+    }
+
+    // OLED-Anzeige mit frischem Lux-Wert aktualisieren
+    aktualisiereOLED();
+  }
+
+  // ----------------------------------------------------
+  // SCHRITT 3: Hintergrund-Blinker steuern (Nur wenn aktiv)
+  // ----------------------------------------------------
+  if (messungAktiv) {
+    verarbeiteBlinken();
+  }
+
+  // ----------------------------------------------------
+  // SCHRITT 4: Temperaturmessung (IMMER alle 7 Sekunden)
+  // ----------------------------------------------------
+  if (aktuelleZeit - letzteTempMessung >= 7000) {
+    letzteTempMessung = aktuelleZeit; 
+
+    sensors.requestTemperatures(); 
+    float tempC = sensors.getTempCByIndex(0);
+    
+    if (tempC != DEVICE_DISCONNECTED_C) {
+      letzteTemperatur = tempC; 
+      int tempInt = (int)round(tempC);
+      
+      Serial.print(">>> 7-Sek-Messung: "); Serial.print(tempC); Serial.println(" C");
+      
+      aktualisiereOLED();
+
+      // Blink-Muster nur triggern, wenn der Modus AKTIV ist
+      if (messungAktiv && blinkSchritt == 0) {
+        if (tempInt >= 0) {
+          starteBlinkMuster(INT_LED, tempInt);
+        } else {
+          starteBlinkMuster(EXT_LED, tempInt);
+        }
+      }
+    } else {
+      Serial.println(">>> Fehler: DS18B20 fehlt!");
+    }
+  }
+}
