@@ -40,19 +40,18 @@ Das Projekt ist modular in mehrere Dateien unterteilt, um die Wartbarkeit zu max
 Enthält das Kernprogramm, die Initialisierung (`setup()`) und die zentrale State-Machine (`loop()`).
 * **Softwaregesteuerte Blockiererkennung:** Überwacht permanent den Bewegungszustand. Bleiben bei aktiver Motoransteuerung die Encoder-Impulse für mehr als **500 ms** aus, wird die Notabschaltung eingeleitet.
 * **Funkgesteuerte ToF-Überwachung:** Liest einen als Kanal A gekennzeichneten Funkkanal aus. Damit wird die ToF-Objekterkennung dynamisch scharf oder inaktiv geschaltet. Eine rote LED zeigt den inaktiven Modus an und eine grüne LED zeigt den aktiven Modus entsprechend an.
-* **Anti-Aliasing Filter:** Beinhaltet einen Plausibilitäts-Zähler für den ToF-Sensor. Ein Objekt muss mehrere Zyklen stabil erkannt werden, um Phasen-Spiegelungen resultierend aus Streulicht oder Staubaufwirbelungen aus größeren Distanzen (z. B. Wände bei 100 cm) herauszufiltern.
+* **Anti-Aliasing Filter:** Beinhaltet einen Plausibilitäts-Zähler für den ToF-Sensor. Ein Objekt muss mehrere Zyklen stabil erkannt werden.
 
 ### 2. `motor_control.h` / `motor_control.cpp`
 Dieses Modul beinhaltet die Ansteuerung des Motortreiberse.
 * `motorenStoppen()`: Setzt beide PWM-Kanäle auf `0` (Motor rollt stromlos aus).
 * `motorVollbremsung()`: Schaltet beide PWM-Kanäle gleichzeitig auf das Maximum (`255`), um die Wicklungen kurzzuschließen und den Motor sofort elektronisch zu blockieren.
-
-### 3. `led_control.h` / `led_control.cpp`
-Steuert das optische Signal-Framework für die bordeigene Diagnostik der internen LED.
-
-### 4. `display_control.h` / `display_control.cpp`
-Abstrahiert die u8g2-Grafikbibliothek für das OLED-Display.
-* `aktualisiereOLED()`: Gibt den Systemstatus (`BEREIT`, `RECHTS`, `LINKS`, `OEFFNEN`, `SCHLIESS`, `BLOCKIERT!`) sowie den **aktuellen ToF-Funkstatus** (z. B. `ToF: AN` / `ToF: AUS`) auf dem Bildschirm aus.
+### 3. `sensors.h` (Sensor- & I2C1-Infrastruktur)
+Dieses Modul beinhaltet die komplette Umgebungssensorik sowie die dazugehörige Bus-Architektur:
+* **I2C1-Bus-Konfiguration:** Initialisiert dediziert **GPIO 26 (SDA)** und **GPIO 27 (SCL)** als zweiten unabhängigen I2C-Bus (`Wire1`) exklusiv für die Time-of-Flight-Sensoren.
+* **Hardware-Adressierung & XSHUT:** Steuert die Pins **GPIO 14 (XSHUT_TOF1)** und **GPIO 13 (XSHUT_TOF2)** sequenziell an, um den beiden VL53L0X-Sensoren beim Systemstart kollisionsfrei ihre eindeutigen I2C-Adressen (`0x30` und `0x31`) zuzuweisen.
+* **Funkgesteuerter Hardware-Interrupt:** Registriert eine blitzschnelle Interrupt-Service-Routine (ISR) auf **GPIO 4 (`TOF_DISABLE_PIN`)**. Ein ankommendes Signal des Funkmoduls toggelt die Variable `tofSensorenAktiv` im Mikrosekundenbereich und schaltet die **Grüne LED (GPIO 8)** oder **Rote LED (GPIO 28)** synchron als Live-Rückmeldung um.
+* **Anti-Aliasing Software-Filter (`messeToF_Gefiltert`):** Wertet den `RangeStatus` der VL53L0X-Sensoren aus, rechnet Millimeter in Zentimeter um und filtert fehlerhafte Phasen-Spiegelungen aus größeren Distanzen (z. B. Wände bei 100 cm) über ein zeitbasiertes Schutzfenster (**10 cm bis 50 cm**) heraus.
 
 ---
 
@@ -65,12 +64,12 @@ Abstrahiert die u8g2-Grafikbibliothek für das OLED-Display.
 
 ### 2. Normalbetrieb & Automatische Öffnung (ToF-Sensor)
 * Befindet sich das System im Zustand **`BEREIT`** und der Funk-Status steht auf Aktiv, leuchtet die **Grüne LED** (ToF aktiv) und die **Rote LED ist aus**. Der VL53L0X-Sensor überwacht nun die Umgebung.
-* Nähert sich eine Person oder ein Objekt im Bereich zwischen **10 cm und 50 cm**, löst die Tür automatisch aus, öffnet sich und fährt nach Ablauf des Timers wieder zu.
+* Nähert sich eine Person oder ein Objekt im Bereich zwischen **10 cm und 50 cm**, löst die Tür automatisch aus, öffnet sich und fährt bis zum erreichen des Endschalters. Bei einer erneuten Objekterkennung fährt die Tür in entgegengesetzter Richtung zu. 
 
 ### 3. Deaktivierung der Automatik per Funk (ToF Ein/Aus)
-* Über die Fernbedienung kann die automatische ToF-Erkennung jederzeit deaktiviert werden.
+* Über den Fernbedienungskanal A kann die automatische ToF-Erkennung jederzeit deaktiviert werden.
 * **Optische Anzeige:** Die **Rote LED schaltet sich EIN** (ToF inaktiv) und die **Grüne LED geht AUS**. Das OLED zeigt `ToF: AUS`.
-* In diesem Zustand bleibt die Tür im Stillstand geschlossen und reagiert **nicht** auf Annäherungen. Die manuelle Steuerung über die Kanäle B, C und D bleibt voll funktionsfähig.
+* In diesem Zustand bleibt die Tür im Stillstand geschlossen und reagiert **nicht** auf Annäherungen. Die manuelle Steuerung über die Kanäle B, C und D sowie die der Taster bleibt voll funktionsfähig.
 
 ### 4. Verhalten im Fehlerfall (Motorblockierung)
 Trifft die Tür während der Fahrt auf ein mechanisches Hindernis oder blockiert, greift die softwaregesteuerte Sicherheitsabschaltung:
