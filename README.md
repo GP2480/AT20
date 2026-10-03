@@ -1,6 +1,6 @@
 # AT20 Automatisches Türsteuerungssystem
 
-Dieses Projekt beinhaltet eine robuste, zustandsgesteuerte Ablaufsteuerung für ein automatisches Türsystem auf Basis der RP2040-Architektur (z.B. Raspberry Pi Pico). Das System kombiniert eine präzise Motorsteuerung per Dual-Channel-PWM, Echtzeit-Positionsrückmeldung über einen Inkrementalencoder, berührungslose Objekterkennung mittels eines Time-of-Flight (ToF) Sensors sowie optisches Feedback über ein OLED-Display und ein dediziertes LED-Status-Framework. Die Automatik kann drahtlos per Funkkanal aktiviert oder deaktiviert werden.
+Dieses Projekt beinhaltet eine robuste, zustandsgesteuerte Ablaufsteuerung für ein automatisches Türsystem auf Basis der RP2040-Architektur. Das System kombiniert eine präzise Motorsteuerung per Dual-Channel-PWM, Echtzeit-Positionsrückmeldung über einen Inkrementalencoder, berührungslose Objekterkennung mittels eines Time-of-Flight (ToF) Sensors sowie optisches Feedback über zwei OLED-Display und ein dediziertes LED-Status-Framework. Die Automatik kann drahtlos via Funkkanäle oder per Taster aktiviert oder deaktiviert werden.
 
 ---
 
@@ -38,12 +38,12 @@ Das Projekt ist modular in mehrere Dateien unterteilt, um die Wartbarkeit zu max
 
 ### 1. `Nikis_Door_021026.ino` (Hauptprogramm)
 Enthält das Kernprogramm, die Initialisierung (`setup()`) und die zentrale State-Machine (`loop()`).
-* **Softwaregesteuerte Blockiererkennung:** Überwacht permanent den Fahrzustand. Bleiben bei aktiver Motoransteuerung die Encoder-Impulse für mehr als **500 ms** aus, wird die Notabschaltung eingeleitet.
-* **Funkgesteuerte ToF-Überwachung:** Liest den dedizierten Funkkanal aus. Schaltet die ToF-Erkennung dynamisch scharf oder inaktiv und steuert die rote sowie grüne LED entsprechend an.
-* **Anti-Aliasing Filter:** Beinhaltet einen Plausibilitäts-Zähler für den ToF-Sensor. Ein Objekt muss mehrere Zyklen stabil erkannt werden, um Phasen-Spiegelungen aus größeren Distanzen (z. B. Wände bei 100 cm) herauszufiltern.
+* **Softwaregesteuerte Blockiererkennung:** Überwacht permanent den Bewegungszustand. Bleiben bei aktiver Motoransteuerung die Encoder-Impulse für mehr als **500 ms** aus, wird die Notabschaltung eingeleitet.
+* **Funkgesteuerte ToF-Überwachung:** Liest einen als Kanal A gekennzeichneten Funkkanal aus. Damit wird die ToF-Objekterkennung dynamisch scharf oder inaktiv geschaltet. Eine rote LED zeigt den inaktiven Modus an und eine grüne LED zeigt den aktiven Modus entsprechend an.
+* **Anti-Aliasing Filter:** Beinhaltet einen Plausibilitäts-Zähler für den ToF-Sensor. Ein Objekt muss mehrere Zyklen stabil erkannt werden, um Phasen-Spiegelungen resultierend aus Streulicht oder Staubaufwirbelungen aus größeren Distanzen (z. B. Wände bei 100 cm) herauszufiltern.
 
 ### 2. `motor_control.h` / `motor_control.cpp`
-Verantwortlich für die direkte Brückenansteuerung der H-Brücke.
+Dieses Modul beinhaltet die Ansteuerung des Motortreiberse.
 * `motorenStoppen()`: Setzt beide PWM-Kanäle auf `0` (Motor rollt stromlos aus).
 * `motorVollbremsung()`: Schaltet beide PWM-Kanäle gleichzeitig auf das Maximum (`255`), um die Wicklungen kurzzuschließen und den Motor sofort elektronisch zu blockieren.
 
